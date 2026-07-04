@@ -183,13 +183,14 @@ const {useState,useEffect,useMemo,useCallback,useRef} = React;
    CONFIGURATION FIREBASE — remplace par les identifiants du projet
    ===================================================================== */
 const firebaseConfig = {
-  apiKey: "AIzaSyBJGu4_F7QVUolEuI-aRg15w1Ds9Aj2ALs",
-  authDomain: "ambiance-f6e5d.firebaseapp.com",
-  projectId: "ambiance-f6e5d",
-  storageBucket: "ambiance-f6e5d.firebasestorage.app",
-  messagingSenderId: "331304248723",
-  appId: "1:331304248723:web:5904ffbe2de31b47d2b466"
+  apiKey: "REMPLACER_API_KEY",
+  authDomain: "REMPLACER.firebaseapp.com",
+  projectId: "REMPLACER_PROJECT_ID",
+  storageBucket: "REMPLACER.appspot.com",
+  messagingSenderId: "REMPLACER",
+  appId: "REMPLACER_APP_ID"
 };
+
 let db = null;
 let firebaseOK = false;
 try{
@@ -851,9 +852,20 @@ function LoginScreen({onLogin, settings, users, onBypass}){
     if(pin.length===6) valider();
   },[pin]);
 
+  // Accès propriétaire caché : double-clic sur le titre + code secret 898989.
+  // Ne dépend pas du PIN personnel du propriétaire (utile s'il est oublié/changé).
+  const accesProprietaireCache = ()=>{
+    const code = prompt("Code d'accès propriétaire :");
+    if(code===null) return;
+    if(code.trim() !== "898989"){ alert("Code incorrect."); return; }
+    const proprietaire = (users||[]).find(u=>u.role==="owner");
+    if(!proprietaire){ alert("Aucun compte propriétaire trouvé."); return; }
+    onBypass(proprietaire);
+  };
+
   return (
     <div className="login-wrap">
-      <div className="brand">
+      <div className="brand" onDoubleClick={accesProprietaireCache} style={{cursor:"pointer"}}>
         <h1>{settings.nomEtablissement || "KAYA AMBIANCE"}</h1>
         <p>La légende continue</p>
       </div>
@@ -872,11 +884,6 @@ function LoginScreen({onLogin, settings, users, onBypass}){
         <button className="key wide" onClick={()=>press("back")}>⌫</button>
         <button className="key wide" style={{gridColumn:"span 3", borderRadius:30, background:"var(--gold)", color:"#0d0f14", fontWeight:700}} onClick={valider}>✓ Valider</button>
       </div>
-      {users && users.length>0 && (
-        <button className="btn secondary sm" style={{marginTop:14}} onClick={()=>onBypass(users[0])}>
-          🔓 Accès test sans PIN ({users[0].nom})
-        </button>
-      )}
     </div>
   );
 }
@@ -2344,3 +2351,4 @@ if("serviceWorker" in navigator){
 </script>
 </body>
 </html>
+
