@@ -2,7 +2,7 @@
   "name": "Kaya Ambiance",
   "short_name": "Kaya",
   "description": "Gestion de bar : ventes, stock, avoirs, dettes et rapports.",
-  "start_url": "./kaya-ambiance-pos.html",
+  "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
