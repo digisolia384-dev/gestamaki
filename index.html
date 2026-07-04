@@ -21,6 +21,28 @@
     --border:#2a2f3d;
     --radius:10px;
   }
+  /* Thème clair : fond blanc/gris clair, texte sombre, accent doré assombri pour le contraste */
+  html[data-theme="clair"]{
+    --bg:#f4f2ee; --bg2:#ffffff; --bg3:#eceae4;
+    --gold:#a9791f; --gold-dim:#c9a54a;
+    --text:#1b1c1f; --text-dim:#5b5f6a;
+    --green:#1f8a4c; --red:#c23b3b; --blue:#2e6fbf;
+    --border:#d9d5cc;
+  }
+  /* Thème néon sombre : noir profond, accents fluo (cyan/magenta), effet lumineux */
+  html[data-theme="neon"]{
+    --bg:#05050a; --bg2:#0b0b16; --bg3:#12121f;
+    --gold:#00f0ff; --gold-dim:#0a8b96;
+    --text:#eafcff; --text-dim:#7a8a9a;
+    --green:#39ff8f; --red:#ff3b6f; --blue:#5ad1ff;
+    --border:#1f2a3a;
+  }
+  html[data-theme="neon"] .brand h1, html[data-theme="neon"] .card h3, html[data-theme="neon"] .topbar .who b{
+    text-shadow:0 0 6px var(--gold), 0 0 14px var(--gold-dim);
+  }
+  html[data-theme="neon"] .btn:not(.secondary):not(.danger){
+    box-shadow:0 0 10px var(--gold-dim);
+  }
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);
     font-family:'Segoe UI',system-ui,-apple-system,sans-serif; overscroll-behavior:none;}
@@ -97,6 +119,7 @@
   .ticket .center{text-align:center;}
   .ticket hr{border:none; border-top:1px dashed #000; margin:8px 0;}
   .ticket .line{display:flex; justify-content:space-between;}
+  .ticket .ticket-total{font-size:16px; font-weight:900; border-top:1px dashed #000; border-bottom:1px dashed #000; padding:4px 0; margin:4px 0;}
   @media print{
     body *{visibility:hidden;}
     .ticket, .ticket *{visibility:visible;}
@@ -215,8 +238,15 @@ function saveLS(data){
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 
 function fmtFCFA(n){
-  n = Number(n)||0;
-  return n.toLocaleString('fr-FR').replace(/,/g,' ') + " F";
+  n = Math.round(Number(n)||0);
+  const neg = n < 0;
+  const chiffres = Math.abs(n).toString();
+  let groupe = "";
+  for(let i=0;i<chiffres.length;i++){
+    if(i>0 && (chiffres.length-i)%3===0) groupe += " "; // espace ASCII simple, sûr pour toute imprimante
+    groupe += chiffres[i];
+  }
+  return (neg?"-":"") + groupe + " F";
 }
 
 async function hashPin(pin){
@@ -269,6 +299,74 @@ function calculerCAEtMarge(ventes){
     });
   });
   return { ca, cout, marge: ca - cout };
+}
+
+/* Échappe une valeur pour l'insérer dans une cellule CSV (gère virgules, guillemets, retours ligne) */
+function csvEchapper(val){
+  const s = (val===null || val===undefined) ? "" : String(val);
+  if(/[",\n;]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+  return s;
+}
+
+/* Génère un CSV des ventes (une ligne par article vendu) et déclenche le téléchargement.
+   Compatible Excel FR (séparateur point-virgule, BOM UTF-8 pour les accents). */
+function exporterVentesCSV(ventes, nomFichier){
+  const entetes = ["Date","Journée","Zone","Caissier","Produit","Quantité","Prix unitaire","Sous-total","Remise %","Total vente","Crédit","Client crédit","Payé","Annulée","Raison annulation","Note"];
+  const lignes = [entetes.map(csvEchapper).join(";")];
+  ventes.forEach(v=>{
+    (v.items && v.items.length ? v.items : [{nom:"(vente sans article)", qte:"", prixUnitaire:""}]).forEach(it=>{
+      lignes.push([
+        v.date, v.journee, v.zone, v.caissierNom,
+        it.nom, it.qte, it.prixUnitaire,
+        v.sousTotal, v.remise||0, v.total,
+        v.credit?"Oui":"Non", v.clientCredit||"", v.credit?(v.paye?"Oui":"Non"):"",
+        v.annulee?"Oui":"Non", v.raisonAnnulation||"", v.note||""
+      ].map(csvEchapper).join(";"));
+    });
+  });
+  const csv = "\uFEFF" + lignes.join("\r\n");
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = nomFichier;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/* Construit le texte du rapport journalier (recettes/dépenses/ventes) pour envoi WhatsApp. */
+function genererRapportTexte(journeeStr, state, settings){
+  const ventesJour = (state.ventes||[]).filter(v=>v.journee===journeeStr && !v.annulee);
+  const { ca, marge } = calculerCAEtMarge(ventesJour);
+  const nbAnnulees = (state.ventes||[]).filter(v=>v.journee===journeeStr && v.annulee).length;
+  const c = state.clotures[journeeStr] || {};
+  const totalRecette = (c.recetteTerrasse||0)+(c.recetteBar||0)+(c.recetteCave||0);
+  const totalDepense = (c.depenseTerrasse||0)+(c.depenseBar||0)+(c.depenseCave||0);
+  const totalVersement = (c.versementTerrasse||0)+(c.versementBar||0)+(c.versementCave||0);
+  const totalCredit = (c.creditHomme||0)+(c.creditFemme||0);
+  const nom = settings.nomEtablissement || "Kaya Ambiance";
+  return [
+    `*${nom}* — Rapport du ${formatDateFR(journeeStr)}`,
+    ``,
+    `🧾 Ventes : ${ventesJour.length} (${nbAnnulees} annulée(s))`,
+    `💰 Chiffre d'affaires : ${fmtFCFA(ca)}`,
+    `📈 Marge estimée : ${fmtFCFA(marge)}`,
+    ``,
+    `📥 Recettes déclarées : ${fmtFCFA(totalRecette)}`,
+    `📤 Dépenses : ${fmtFCFA(totalDepense)}`,
+    `🏦 Versements : ${fmtFCFA(totalVersement)}`,
+    `💳 Crédits clients (H/F) : ${fmtFCFA(totalCredit)}`,
+    ``,
+    c.cloture ? `✅ Clôturé par ${c.cloturePar}` : `⚠️ Journée non clôturée`,
+  ].join("\n");
+}
+
+/* Ouvre WhatsApp (app ou web) avec le rapport pré-rempli vers le numéro configuré.
+   Nécessite une confirmation manuelle d'envoi dans WhatsApp (aucune API d'envoi automatique). */
+function envoyerRapportWhatsApp(numero, texte){
+  const num = (numero||"").replace(/[^\d]/g,"");
+  if(!num){ alert("Aucun numéro WhatsApp configuré (Réglages → Rapport journalier WhatsApp)."); return; }
+  const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(texte);
+  window.open(url, "_blank");
 }
 
 /* File d'attente d'écriture offline-first : on écrit tout de suite en local,
@@ -342,7 +440,8 @@ function construireTicketEscPos(lignesTexte, largeurMM){
     if(l.dashes) text("-".repeat(cols));
     else if(l.split){
       const [g,d] = l.split;
-      const espace = Math.max(1, cols - g.length - d.length);
+      const colsEffectif = l.big ? Math.floor(cols/2) : cols;
+      const espace = Math.max(1, colsEffectif - g.length - d.length);
       text(g + " ".repeat(espace) + d);
     } else text(l.text || "");
     feed(1);
@@ -458,10 +557,15 @@ function ticketLignesVente(data, settings){
   });
   if(data.remise>0) lignes.push({split:["Remise "+data.remise+"%", "-"+fmtFCFA(data.montantRemise)]});
   lignes.push({dashes:true});
-  lignes.push({split:["TOTAL", fmtFCFA(data.total)], bold:true});
+  lignes.push({split:["TOTAL", fmtFCFA(data.total)], bold:true, big:true});
   if(data.montantRecu) lignes.push({split:["Reçu", fmtFCFA(data.montantRecu)]});
   if(data.monnaie!=null) lignes.push({split:["Monnaie", fmtFCFA(data.monnaie)]});
   lignes.push({dashes:true});
+  if(data.note && data.note.trim()){
+    lignes.push({text:"Note :", bold:true});
+    lignes.push({text:data.note.trim()});
+    lignes.push({dashes:true});
+  }
   lignes.push({text:"Caissier : "+data.caissierNom});
   lignes.push({text:data.date});
   lignes.push({dashes:true});
@@ -951,9 +1055,16 @@ function Ticket({data, type, settings}){
       ) : (
         <>
           <div className="line"><span>Zone</span><span>{data.zone}</span></div>
-          <div className="line"><span>Total</span><span>{fmtFCFA(data.total)}</span></div>
+          <div className="line ticket-total"><span>TOTAL</span><span>{fmtFCFA(data.total)}</span></div>
           <div className="line"><span>Caissier</span><span>{data.caissierNom}</span></div>
           <div className="line"><span>Date</span><span>{data.date}</span></div>
+          {data.note && data.note.trim() && (
+            <>
+              <hr/>
+              <p style={{margin:"2px 0", fontWeight:"bold"}}>Note :</p>
+              <p style={{margin:"2px 0", whiteSpace:"pre-wrap"}}>{data.note.trim()}</p>
+            </>
+          )}
         </>
       )}
       <hr/>
@@ -2030,6 +2141,62 @@ function DashboardModule({state, journee}){
 /* =====================================================================
    MODULE : PROPRIETAIRE (gestion utilisateurs + paramètres)
    ===================================================================== */
+/* =====================================================================
+   MODULE : EXPORT CSV & RAPPORT WHATSAPP
+   ===================================================================== */
+function ExportModule({state, settings, journee}){
+  const [debut,setDebut] = useState(journee);
+  const [fin,setFin] = useState(journee);
+
+  const exporterPeriode = ()=>{
+    const ventes = (state.ventes||[]).filter(v=> v.journee>=debut && v.journee<=fin);
+    if(ventes.length===0){ alert("Aucune vente sur cette période."); return; }
+    exporterVentesCSV(ventes, `ventes_${debut}_a_${fin}.csv`);
+  };
+
+  const exporterTout = ()=>{
+    if((state.ventes||[]).length===0){ alert("Aucune vente enregistrée."); return; }
+    exporterVentesCSV(state.ventes, `ventes_historique_complet.csv`);
+  };
+
+  const rapportApercu = genererRapportTexte(journee, state, settings);
+
+  return (
+    <div>
+      <div className="card">
+        <h3>📊 Export des ventes (CSV)</h3>
+        <div className="field">
+          <label>Période — du</label>
+          <input type="date" value={debut} onChange={e=>setDebut(e.target.value)}/>
+        </div>
+        <div className="field">
+          <label>au</label>
+          <input type="date" value={fin} onChange={e=>setFin(e.target.value)}/>
+        </div>
+        <button className="btn" onClick={exporterPeriode}>⬇️ Exporter la période</button>
+        <button className="btn secondary" style={{marginTop:8}} onClick={exporterTout}>⬇️ Exporter tout l'historique</button>
+        <p style={{fontSize:11, color:"var(--text-dim)", marginTop:8}}>
+          Le fichier CSV s'ouvre directement dans Excel ou Google Sheets (une ligne par article vendu).
+        </p>
+      </div>
+
+      <div className="card">
+        <h3>📤 Rapport journalier WhatsApp</h3>
+        <p style={{fontSize:12, color:"var(--text-dim)"}}>Aperçu du rapport pour la journée du {formatDateFR(journee)} :</p>
+        <div className="ticket" style={{whiteSpace:"pre-wrap", fontSize:12.5}}>{rapportApercu}</div>
+        <button className="btn" style={{marginTop:10}} onClick={()=>envoyerRapportWhatsApp(settings.whatsappRapport, rapportApercu)}>
+          💬 Envoyer sur WhatsApp
+        </button>
+        {!settings.whatsappRapport && (
+          <p style={{fontSize:11, color:"var(--red)", marginTop:6}}>
+            Aucun numéro configuré — renseigne-le dans Réglages → Rapport journalier WhatsApp.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function OwnerModule({state, patchState, settings, patchSettings, currentUser, journee}){
   const [tab,setTab] = useState("users");
   const [form,setForm] = useState({nom:"", role:"caissier", zones:["bar"], pin:""});
@@ -2046,6 +2213,8 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
   const [logoDataUrl,setLogoDataUrl] = useState(settings.logoDataUrl || "");
   const [piedTicket,setPiedTicket] = useState(settings.piedTicket || "Merci de votre confiance !");
   const [copiesTicket,setCopiesTicket] = useState(settings.copiesTicket || 1);
+  const [theme,setTheme] = useState(settings.theme || "sombre");
+  const [whatsappRapport,setWhatsappRapport] = useState(settings.whatsappRapport || "");
 
   const choisirLogo = (e)=>{
     const file = e.target.files[0];
@@ -2080,7 +2249,8 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
   const sauverParams = ()=>{
     patchSettings({
       heureArret: Number(heureArret), nomEtablissement: nomEtab,
-      adresse, logoDataUrl, piedTicket: piedTicket.split("\n").slice(0,3).join("\n"), copiesTicket: Number(copiesTicket)
+      adresse, logoDataUrl, piedTicket: piedTicket.split("\n").slice(0,3).join("\n"), copiesTicket: Number(copiesTicket),
+      theme, whatsappRapport: whatsappRapport.replace(/[^\d+]/g,"")
     });
     alert("Paramètres enregistrés.");
   };
@@ -2094,6 +2264,7 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
         <button className={tab==="dettes"?"active":""} onClick={()=>setTab("dettes")}>Dettes</button>
         <button className={tab==="avoirs"?"active":""} onClick={()=>setTab("avoirs")}>Avoirs</button>
         <button className={tab==="global"?"active":""} onClick={()=>setTab("global")}>Clôtures</button>
+        <button className={tab==="export"?"active":""} onClick={()=>setTab("export")}>Export</button>
       </div>
 
       {tab==="reappro" && (
@@ -2186,6 +2357,21 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
 
       {tab==="params" && (
         <div className="card">
+          <h3>🎨 Apparence</h3>
+          <div className="field">
+            <label>Thème de l'application</label>
+            <div className="discount-chips">
+              <button className={theme==="sombre"?"active":""} onClick={()=>{setTheme("sombre"); patchSettings({theme:"sombre"});}}>🌙 Sombre (actuel)</button>
+              <button className={theme==="clair"?"active":""} onClick={()=>{setTheme("clair"); patchSettings({theme:"clair"});}}>☀️ Clair</button>
+              <button className={theme==="neon"?"active":""} onClick={()=>{setTheme("neon"); patchSettings({theme:"neon"});}}>🌈 Néon sombre</button>
+            </div>
+            <p style={{fontSize:11, color:"var(--text-dim)", marginTop:4}}>Le changement s'applique immédiatement, sur tout l'écran.</p>
+          </div>
+        </div>
+      )}
+
+      {tab==="params" && (
+        <div className="card">
           <h3>🖼️ Logo du commerce</h3>
           {logoDataUrl && (
             <div className="center" style={{textAlign:"center", marginBottom:10}}>
@@ -2231,6 +2417,25 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
           </div>
           <button className="btn" style={{marginTop:10}} onClick={sauverParams}>Enregistrer les paramètres</button>
         </div>
+      )}
+
+      {tab==="params" && (
+        <div className="card">
+          <h3>📤 Rapport journalier WhatsApp</h3>
+          <div className="field">
+            <label>Numéro WhatsApp (avec indicatif pays, ex : +22670000000)</label>
+            <input value={whatsappRapport} placeholder="+226XXXXXXXX" onChange={e=>setWhatsappRapport(e.target.value)}/>
+          </div>
+          <p style={{fontSize:11, color:"var(--text-dim)"}}>
+            Ce numéro sera utilisé par le bouton "Envoyer sur WhatsApp" (onglet Export) pour préparer le rapport du jour.
+            Par sécurité, WhatsApp exige toujours une confirmation manuelle avant l'envoi (aucun message n'est envoyé automatiquement en arrière-plan).
+          </p>
+          <button className="btn" style={{marginTop:8}} onClick={sauverParams}>Enregistrer les paramètres</button>
+        </div>
+      )}
+
+      {tab==="export" && (
+        <ExportModule state={state} settings={settings} journee={journee} />
       )}
 
       {tab==="avoirs" && (
@@ -2284,7 +2489,7 @@ function App(){
   });
   const [settings,setSettings] = useState(()=>{
     const ls = loadLS();
-    return ls.settings || {heureArret:2, nomEtablissement:"Kaya Ambiance"};
+    return ls.settings || {heureArret:2, nomEtablissement:"Kaya Ambiance", theme:"sombre"};
   });
   const [currentUser,setCurrentUser] = useState(null);
   const [tab,setTab] = useState("vente");
@@ -2307,6 +2512,11 @@ function App(){
     window.addEventListener('online',on); window.addEventListener('offline',off);
     return ()=>{window.removeEventListener('online',on); window.removeEventListener('offline',off);};
   },[]);
+
+  // Applique le thème choisi (clair / néon sombre / sombre) sur la page entière
+  useEffect(()=>{
+    document.documentElement.setAttribute('data-theme', settings.theme || 'sombre');
+  },[settings.theme]);
 
   /* =====================================================================
      SYNCHRONISATION TEMPS REEL MULTI-APPAREIL
