@@ -9,9 +9,9 @@
 const CACHE_NAME = "kaya-ambiance-v1";
 
 // Fichiers de l'application à mettre en cache dès l'installation.
-// Adapte "./kaya-ambiance-pos.html" si tu renommes le fichier HTML.
+// Adapte "./index.html" si tu renommes le fichier HTML.
 const FICHIERS_APP = [
-  "./kaya-ambiance-pos.html",
+  "./index.html",
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",
@@ -63,7 +63,7 @@ self.addEventListener("fetch", (event) => {
           if (reponseCache) return reponseCache;
           // Repli ultime : la page principale si on demandait une navigation
           if (event.request.mode === "navigate") {
-            return caches.match("./kaya-ambiance-pos.html");
+            return caches.match("./index.html");
           }
         })
       )
