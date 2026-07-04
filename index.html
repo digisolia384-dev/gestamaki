@@ -279,6 +279,12 @@ function queueWrite(collection, id, payload){
     db.collection(collection).doc(id).set(payload, {merge:true}).catch(()=>{});
   }, 0);
 }
+function queueDelete(collection, id){
+  setTimeout(()=>{
+    if(!firebaseOK) return;
+    db.collection(collection).doc(id).delete().catch(()=>{});
+  }, 0);
+}
 
 /* =====================================================================
    IMPRESSION THERMIQUE BLUETOOTH (ESC/POS)
@@ -759,7 +765,10 @@ function VenteModule({state, patchState, currentUser, journee, settings}){
         if(!draft.stock[journee][zone][l.prod.id]) draft.stock[journee][zone][l.prod.id] = {initial:0,entree:0,reste:0};
         // Décrémente le stock permanent du produit
         const p = draft.produits.find(x=>x.id===l.prod.id);
-        if(p) p.stock = Math.max(0, (p.stock||0) - l.qte);
+        if(p){
+          p.stock = Math.max(0, (p.stock||0) - l.qte);
+          queueWrite("produits", p.id, p);
+        }
       });
     });
     queueWrite("ventes", vente.id, vente);
@@ -1050,6 +1059,7 @@ function ClotureModule({state, patchState, currentUser, journee}){
     patchState(draft=>{
       if(!draft.clotures[journee]) draft.clotures[journee] = {...cloture};
       draft.clotures[journee][field] = field.startsWith("cloture")&&typeof val!=="number" ? val : Number(val)||0;
+      queueWrite("clotures", journee, draft.clotures[journee]);
     });
   };
 
@@ -1061,8 +1071,8 @@ function ClotureModule({state, patchState, currentUser, journee}){
   const finaliser = ()=>{
     patchState(draft=>{
       draft.clotures[journee] = {...draft.clotures[journee], cloture:true, cloturePar: currentUser.nom, timestamp: Date.now()};
+      queueWrite("clotures", journee, draft.clotures[journee]);
     });
-    queueWrite("clotures", journee, {...cloture, cloture:true, cloturePar: currentUser.nom});
     alert("Clôture enregistrée pour la journée du " + formatDateFR(journee));
   };
 
@@ -1164,7 +1174,10 @@ function ReapproModule({state, patchState, currentUser}){
     };
     patchState(draft=>{
       const prod = draft.produits.find(x=>x.id===p.id);
-      if(prod){ prod.stock = (prod.stock||0)+q; if(achat>0) prod.prixAchat = achat; }
+      if(prod){
+        prod.stock = (prod.stock||0)+q; if(achat>0) prod.prixAchat = achat;
+        queueWrite("produits", prod.id, prod);
+      }
       if(!draft.mouvements) draft.mouvements = [];
       draft.mouvements.push(mouvement);
     });
@@ -1183,7 +1196,10 @@ function ReapproModule({state, patchState, currentUser}){
     };
     patchState(draft=>{
       const prod = draft.produits.find(x=>x.id===p.id);
-      if(prod) prod.stock = n;
+      if(prod){
+        prod.stock = n;
+        queueWrite("produits", prod.id, prod);
+      }
       if(!draft.mouvements) draft.mouvements = [];
       draft.mouvements.push(mouvement);
     });
@@ -1288,13 +1304,16 @@ function DettesModule({state, patchState}){
   const marquerPaye = (venteId)=>{
     patchState(draft=>{
       const v = draft.ventes.find(x=>x.id===venteId);
-      if(v) v.paye = true;
+      if(v){ v.paye = true; queueWrite("ventes", v.id, v); }
     });
   };
   const soldeTout = (client)=>{
     if(!confirm("Marquer toutes les dettes de "+client+" comme payées ?")) return;
     patchState(draft=>{
-      draft.ventes.filter(v=>v.credit && v.clientCredit===client && !v.paye).forEach(v=> v.paye = true);
+      draft.ventes.filter(v=>v.credit && v.clientCredit===client && !v.paye).forEach(v=>{
+        v.paye = true;
+        queueWrite("ventes", v.id, v);
+      });
     });
   };
 
@@ -1385,8 +1404,12 @@ function MesVentesModule({state, patchState, currentUser, journee, settings}){
         v.raisonAnnulation = raison.trim();
         v.items.forEach(it=>{
           const p = draft.produits.find(x=>x.id===it.prodId);
-          if(p) p.stock = (p.stock||0) + it.qte;
+          if(p){
+            p.stock = (p.stock||0) + it.qte;
+            queueWrite("produits", p.id, p);
+          }
         });
+        queueWrite("ventes", v.id, v);
       }
     });
   };
@@ -1503,7 +1526,7 @@ function AvoirsModule({state, patchState, currentUser, journee, settings}){
   const marquerImprime = (id)=>{
     patchState(draft=>{
       const a = draft.avoirs.find(x=>x.id===id);
-      if(a) a.imprime = true;
+      if(a){ a.imprime = true; queueWrite("avoirs", a.id, a); }
     });
   };
 
@@ -1618,8 +1641,12 @@ function VentesModule({state, patchState, journee}){
         v.raisonAnnulation = raison.trim();
         v.items.forEach(it=>{
           const p = draft.produits.find(x=>x.id===it.prodId);
-          if(p) p.stock = (p.stock||0) + it.qte;
+          if(p){
+            p.stock = (p.stock||0) + it.qte;
+            queueWrite("produits", p.id, p);
+          }
         });
+        queueWrite("ventes", v.id, v);
       }
     });
   };
@@ -1822,13 +1849,14 @@ function ProduitsModule({state, patchState}){
   const modifierChamp = (id, champ, val)=>{
     patchState(draft=>{
       const p = draft.produits.find(x=>x.id===id);
-      if(p) p[champ] = Number(val)||0;
+      if(p){ p[champ] = Number(val)||0; queueWrite("produits", p.id, p); }
     });
   };
 
   const supprimer = (id)=>{
     if(!confirm("Supprimer ce produit du catalogue ?")) return;
     patchState(draft=>{ draft.produits = draft.produits.filter(p=>p.id!==id); });
+    queueDelete("produits", id);
   };
 
   return (
@@ -2039,13 +2067,14 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
   const toggleActif = (id)=>{
     patchState(draft=>{
       const u = draft.users.find(x=>x.id===id);
-      if(u) u.actif = !u.actif;
+      if(u){ u.actif = !u.actif; queueWrite("users", u.id, u); }
     });
   };
 
   const supprimerUser = (id)=>{
     if(!confirm("Supprimer cet utilisateur ?")) return;
     patchState(draft=>{ draft.users = draft.users.filter(u=>u.id!==id); });
+    queueDelete("users", id);
   };
 
   const sauverParams = ()=>{
