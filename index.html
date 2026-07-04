@@ -826,7 +826,7 @@ function VenteModule({state, patchState, currentUser, journee, settings}){
 /* =====================================================================
    COMPOSANT : PAVE NUMERIQUE (LOGIN PIN)
    ===================================================================== */
-function LoginScreen({onLogin, settings, users, onBypass}){
+function LoginScreen({onLogin, settings, users, onBypass, onCreerProprietaire}){
   const [pin,setPin] = useState("");
   const [error,setError] = useState("");
   const [busy,setBusy] = useState(false);
@@ -853,20 +853,46 @@ function LoginScreen({onLogin, settings, users, onBypass}){
     if(pin.length===6) valider();
   },[pin]);
 
-  // Accès propriétaire caché : double-clic sur le titre + code secret 898989.
-  // Ne dépend pas du PIN personnel du propriétaire (utile s'il est oublié/changé).
+  // Accès propriétaire caché : appui long (≥800ms) sur le titre + code secret 898989.
+  // L'appui long est utilisé plutôt que le double-tap car sur mobile, deux taps rapides
+  // sont souvent interceptés par le geste natif "double-tap pour zoomer" du navigateur,
+  // ce qui rend le double-tap peu fiable selon les appareils. L'appui long n'a pas cette
+  // ambiguïté et fonctionne de façon constante sur tous les navigateurs tactiles.
+  const pressTimerRef = useRef(null);
+  const demarrerAppuiLong = ()=>{
+    annulerAppuiLong();
+    pressTimerRef.current = setTimeout(()=>{
+      pressTimerRef.current = null;
+      accesProprietaireCache();
+    }, 800);
+  };
+  const annulerAppuiLong = ()=>{
+    if(pressTimerRef.current){ clearTimeout(pressTimerRef.current); pressTimerRef.current = null; }
+  };
   const accesProprietaireCache = ()=>{
     const code = prompt("Code d'accès propriétaire :");
     if(code===null) return;
     if(code.trim() !== "898989"){ alert("Code incorrect."); return; }
     const proprietaire = (users||[]).find(u=>u.role==="owner");
-    if(!proprietaire){ alert("Aucun compte propriétaire trouvé."); return; }
-    onBypass(proprietaire);
+    if(proprietaire){ onBypass(proprietaire); return; }
+    // Auto-réparateur : si aucun compte owner n'existe encore (bootstrap pas encore
+    // exécuté, données corrompues, ancien onglet non rechargé...), on en crée un
+    // immédiatement au lieu de simplement bloquer l'accès.
+    onCreerProprietaire().then(nouveau=>{
+      alert("Aucun compte propriétaire n'existait : un nouveau a été créé (PIN par défaut 999999, à changer dans Admin).");
+      onBypass(nouveau);
+    });
   };
 
   return (
     <div className="login-wrap">
-      <div className="brand" onDoubleClick={accesProprietaireCache} style={{cursor:"pointer"}}>
+      <div className="brand"
+        onPointerDown={demarrerAppuiLong}
+        onPointerUp={annulerAppuiLong}
+        onPointerLeave={annulerAppuiLong}
+        onPointerCancel={annulerAppuiLong}
+        onContextMenu={(e)=>e.preventDefault()}
+        style={{cursor:"pointer", touchAction:"manipulation", userSelect:"none", WebkitTouchCallout:"none"}}>
         <h1>{settings.nomEtablissement || "KAYA AMBIANCE"}</h1>
         <p>La légende continue</p>
       </div>
@@ -2236,13 +2262,13 @@ function App(){
   const [online,setOnline] = useState(navigator.onLine);
   const bootRef = useRef(false);
 
-  // Bootstrap : créer un compte propriétaire par défaut si aucun utilisateur n'existe
+  // Bootstrap : créer un compte propriétaire par défaut si aucun compte owner n'existe
   useEffect(()=>{
     if(bootRef.current) return;
     bootRef.current = true;
-    if(state.users.length===0){
+    if(!state.users.some(u=>u.role==="owner")){
       hashPin("999999").then(h=>{
-        setState(s=>({...s, users:[{id:uid(), nom:"Propriétaire", role:"owner", zone:"toutes", pinHash:h, actif:true}]}));
+        setState(s=>({...s, users:[...s.users, {id:uid(), nom:"Propriétaire", role:"owner", zone:"toutes", pinHash:h, actif:true}]}));
       });
     }
   },[]);
@@ -2346,8 +2372,17 @@ function App(){
     setTab(defaultTab(user.role));
   };
 
+  const creerProprietaireUrgence = ()=>{
+    return hashPin("999999").then(h=>{
+      const nouveauProprietaire = {id:uid(), nom:"Propriétaire", role:"owner", zone:"toutes", pinHash:h, actif:true};
+      setState(s=>({...s, users:[...s.users, nouveauProprietaire]}));
+      return nouveauProprietaire;
+    });
+  };
+
   if(!currentUser){
     return <LoginScreen onLogin={handleLogin} settings={settings} users={state.users}
+      onCreerProprietaire={creerProprietaireUrgence}
       onBypass={(u)=>{ setCurrentUser(u); setTab(defaultTab(u.role)); }} />;
   }
 
