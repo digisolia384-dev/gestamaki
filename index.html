@@ -12,6 +12,7 @@
 <script crossorigin src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 <script crossorigin src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script crossorigin src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script crossorigin src="https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <style>
   :root{
     --bg:#0d0f14; --bg2:#151822; --bg3:#1c202c;
@@ -118,7 +119,9 @@
   .ticket h4{text-align:center; margin:0 0 4px; font-size:14px;}
   .ticket .center{text-align:center;}
   .ticket hr{border:none; border-top:1px dashed #000; margin:8px 0;}
-  .ticket .line{display:flex; justify-content:space-between;}
+  .ticket .line{display:flex; justify-content:space-between; gap:8px;}
+  .ticket .line span:first-child{flex-shrink:0;}
+  .ticket .line span:last-child{text-align:right; word-break:break-word; overflow-wrap:anywhere;}
   .ticket .ticket-total{font-size:16px; font-weight:900; border-top:1px dashed #000; border-bottom:1px dashed #000; padding:4px 0; margin:4px 0;}
   @media print{
     body *{visibility:hidden;}
@@ -311,7 +314,7 @@ function csvEchapper(val){
 /* Génère un CSV des ventes (une ligne par article vendu) et déclenche le téléchargement.
    Compatible Excel FR (séparateur point-virgule, BOM UTF-8 pour les accents). */
 function exporterVentesCSV(ventes, nomFichier){
-  const entetes = ["Date","Journée","Zone","Caissier","Produit","Quantité","Prix unitaire","Sous-total","Remise %","Total vente","Crédit","Client crédit","Payé","Annulée","Raison annulation","Note"];
+  const entetes = ["Date","Journée","Zone","Caissier","Produit","Quantité","Prix unitaire","Sous-total","Remise %","Total vente","Crédit","Client crédit","Téléphone client","Motif crédit","Payé","Client fidélité","Téléphone fidélité","Annulée","Raison annulation","Note"];
   const lignes = [entetes.map(csvEchapper).join(";")];
   ventes.forEach(v=>{
     (v.items && v.items.length ? v.items : [{nom:"(vente sans article)", qte:"", prixUnitaire:""}]).forEach(it=>{
@@ -319,7 +322,8 @@ function exporterVentesCSV(ventes, nomFichier){
         v.date, v.journee, v.zone, v.caissierNom,
         it.nom, it.qte, it.prixUnitaire,
         v.sousTotal, v.remise||0, v.total,
-        v.credit?"Oui":"Non", v.clientCredit||"", v.credit?(v.paye?"Oui":"Non"):"",
+        v.credit?"Oui":"Non", v.clientCredit||"", v.clientTelephone||"", v.clientMotif||"", v.credit?(v.paye?"Oui":"Non"):"",
+        v.clientFideliteNom||"", v.clientFideliteTelephone||"",
         v.annulee?"Oui":"Non", v.raisonAnnulation||"", v.note||""
       ].map(csvEchapper).join(";"));
     });
@@ -367,6 +371,23 @@ function envoyerRapportWhatsApp(numero, texte){
   if(!num){ alert("Aucun numéro WhatsApp configuré (Réglages → Rapport journalier WhatsApp)."); return; }
   const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(texte);
   window.open(url, "_blank");
+}
+
+/* Bip sonore court d'alerte (stock bas, etc.) — généré directement, sans fichier audio externe. */
+function biperAlerte(){
+  try{
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if(!Ctx) return;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine"; osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime+0.25);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime+0.25);
+  }catch(e){ /* silencieux si non supporté */ }
+  if(navigator.vibrate) navigator.vibrate(120);
 }
 
 /* File d'attente d'écriture offline-first : on écrit tout de suite en local,
@@ -423,13 +444,32 @@ async function connecterImprimanteBLE(){
   }
 }
 
+/* Corrige le bug des « écritures cassées » sur les reçus thermiques.
+   Les mini-imprimantes ESC/POS attendent un encodage mono-octet (CP437/850/1252),
+   pas de l'UTF-8. Un caractère accentué (É, È, Ç, °, œ...) encodé en UTF-8
+   devient alors 2 octets illisibles à l'impression — d'où les caractères cassés,
+   surtout visibles sur le reçu d'avoir ("REÇU D'AVOIR", "Établissement", "N°").
+   On translittère donc vers de l'ASCII pur avant impression thermique
+   (l'écran et l'impression navigateur, eux, gardent les accents normalement). */
+function translittererPourImprimante(str){
+  return String(str==null ? "" : str)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/œ/g,'oe').replace(/Œ/g,'OE')
+    .replace(/æ/g,'ae').replace(/Æ/g,'AE')
+    .replace(/ß/g,'ss')
+    .replace(/°/g,'deg')
+    .replace(/[’‘]/g,"'").replace(/[“”]/g,'"')
+    .replace(/[–—]/g,'-')
+    .replace(/[^\x00-\x7F]/g,'?'); // filet de sécurité pour tout caractère non ASCII restant
+}
+
 function construireTicketEscPos(lignesTexte, largeurMM){
   const cols = largeurMM===80 ? 48 : 32;
   const ESC=0x1B, GS=0x1D;
   const enc = new TextEncoder();
   let buf = [];
   const push = a => buf.push(...a);
-  const text = t => push(Array.from(enc.encode(t.slice(0,300))));
+  const text = t => push(Array.from(enc.encode(translittererPourImprimante(t).slice(0,300))));
   const feed = (n=1) => { for(let i=0;i<n;i++) push([0x0A]); };
 
   push([ESC,0x40]); // init
@@ -439,7 +479,7 @@ function construireTicketEscPos(lignesTexte, largeurMM){
     if(l.big) push([GS,0x21,0x11]); else push([GS,0x21,0x00]);
     if(l.dashes) text("-".repeat(cols));
     else if(l.split){
-      const [g,d] = l.split;
+      const g = translittererPourImprimante(l.split[0]), d = translittererPourImprimante(l.split[1]);
       const colsEffectif = l.big ? Math.floor(cols/2) : cols;
       const espace = Math.max(1, colsEffectif - g.length - d.length);
       text(g + " ".repeat(espace) + d);
@@ -654,6 +694,13 @@ function PanierSheet({lignes, onQte, onVider, onClose, onValider, currentUser, s
   const [connecte,setConnecte] = useState(!!blePrinterRef.characteristic);
   const [largeurBLE,setLargeurBLE] = useState(80);
   const [busy,setBusy] = useState(false);
+  const [afficherCredit,setAfficherCredit] = useState(false);
+  const [creditNom,setCreditNom] = useState("");
+  const [creditTelephone,setCreditTelephone] = useState("");
+  const [creditMotif,setCreditMotif] = useState("");
+  const [afficherFidelite,setAfficherFidelite] = useState(false);
+  const [fideliteNom,setFideliteNom] = useState("");
+  const [fideliteTelephone,setFideliteTelephone] = useState("");
 
   const sousTotal = lignes.reduce((s,l)=>s+l.sousTotal,0);
   const montantRemise = Math.round(sousTotal * remise/100);
@@ -669,12 +716,25 @@ function PanierSheet({lignes, onQte, onVider, onClose, onValider, currentUser, s
 
   const finaliser = async (avecImpression, aCredit)=>{
     if(lignes.length===0) return;
-    setBusy(true);
-    let clientCredit = null;
-    if(aCredit){
-      clientCredit = prompt("Nom du client (vente à crédit) :");
-      if(!clientCredit){ setBusy(false); return; }
+
+    // Vente à crédit : on affiche d'abord le formulaire (nom, téléphone, motif)
+    // avant de valider — nécessaire pour l'historique des créanciers.
+    if(aCredit && !afficherCredit){
+      setAfficherCredit(true);
+      return;
     }
+    let clientCredit = null, clientTelephone = null, clientMotif = null;
+    if(aCredit){
+      if(!creditNom.trim() || !creditTelephone.trim()){
+        alert("Nom et numéro de téléphone du client sont obligatoires pour une vente à crédit.");
+        return;
+      }
+      clientCredit = creditNom.trim();
+      clientTelephone = creditTelephone.trim();
+      clientMotif = creditMotif.trim() || null;
+    }
+
+    setBusy(true);
 
     let ok = true;
     if(avecImpression){
@@ -689,7 +749,11 @@ function PanierSheet({lignes, onQte, onVider, onClose, onValider, currentUser, s
       }
     }
 
-    const venteData = onValider({remise, montantRemise, total, note, credit:aCredit, clientCredit});
+    const venteData = onValider({
+      remise, montantRemise, total, note, credit:aCredit, clientCredit, clientTelephone, clientMotif,
+      clientFideliteNom: !aCredit ? (fideliteNom.trim()||null) : null,
+      clientFideliteTelephone: !aCredit ? (fideliteTelephone.trim()||null) : null
+    });
 
     if(avecImpression){
       const lignesTicket = ticketLignesVente({
@@ -774,6 +838,20 @@ function PanierSheet({lignes, onQte, onVider, onClose, onValider, currentUser, s
             )}
           </div>
         )}
+
+        <button className="btn secondary sm" onClick={()=>setAfficherFidelite(a=>!a)}>🎁 Client fidélité (optionnel)</button>
+        {afficherFidelite && (
+          <div className="monnaie-box">
+            <div className="field" style={{marginBottom:6}}>
+              <label>Nom du client</label>
+              <input value={fideliteNom} placeholder="Nom et prénom" onChange={e=>setFideliteNom(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Numéro de téléphone</label>
+              <input value={fideliteTelephone} placeholder="Ex : 70000000" inputMode="tel" onChange={e=>setFideliteTelephone(e.target.value)} />
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="cart-footer">
@@ -790,15 +868,37 @@ function PanierSheet({lignes, onQte, onVider, onClose, onValider, currentUser, s
         <div className="cart-total-row">
           <span>TOTAL</span><span className="gold">{fmtFCFA(total)}</span>
         </div>
+        {afficherCredit && (
+          <div className="monnaie-box" style={{marginBottom:8}}>
+            <div className="field" style={{marginBottom:6}}>
+              <label>Nom du client *</label>
+              <input value={creditNom} placeholder="Nom et prénom" onChange={e=>setCreditNom(e.target.value)} />
+            </div>
+            <div className="field" style={{marginBottom:6}}>
+              <label>Numéro de téléphone *</label>
+              <input value={creditTelephone} placeholder="Ex : 70000000" inputMode="tel" onChange={e=>setCreditTelephone(e.target.value)} />
+            </div>
+            <div className="field" style={{marginBottom:6}}>
+              <label>Motif (optionnel)</label>
+              <input value={creditMotif} placeholder="Ex : oubli de portefeuille" onChange={e=>setCreditMotif(e.target.value)} />
+            </div>
+            <button className="btn credit" disabled={busy} onClick={()=>finaliser(false,true)}>
+              ✔️ Confirmer le crédit
+            </button>
+            <button className="btn secondary sm" style={{marginTop:6}} onClick={()=>setAfficherCredit(false)}>Annuler</button>
+          </div>
+        )}
         <button className="btn ble" disabled={busy} onClick={()=>finaliser(true,false)} style={{marginBottom:8}}>
           🖨️ BLE {largeurBLE}mm + Valider
         </button>
         <button className="btn" disabled={busy} onClick={()=>finaliser(false,false)} style={{marginBottom:8}}>
           ✅ Valider sans ticket
         </button>
-        <button className="btn credit" disabled={busy} onClick={()=>finaliser(false,true)} style={{marginBottom:8}}>
-          💳 Vendre à crédit
-        </button>
+        {!afficherCredit && (
+          <button className="btn credit" disabled={busy} onClick={()=>finaliser(false,true)} style={{marginBottom:8}}>
+            💳 Vendre à crédit
+          </button>
+        )}
         <button className="btn secondary" onClick={onVider}>Tout annuler</button>
       </div>
     </div>
@@ -824,7 +924,17 @@ function VenteModule({state, patchState, currentUser, journee, settings}){
     p.zone===zone && (recherche.trim()==="" || p.nom.toLowerCase().includes(recherche.toLowerCase()))
   );
 
-  const ajouter = (prodId)=> setPanier(p=>({...p, [prodId]: (p[prodId]||0)+1}));
+  const ajouter = (prodId)=>{
+    setPanier(p=>{
+      const nouvelleQte = (p[prodId]||0)+1;
+      const prod = state.produits.find(x=>x.id===prodId);
+      if(prod){
+        const restant = (prod.stock||0) - nouvelleQte;
+        if(restant <= (prod.seuilAlerte||5)) biperAlerte();
+      }
+      return {...p, [prodId]: nouvelleQte};
+    });
+  };
   const changerQte = (prodId, delta)=>{
     setPanier(p=>{
       const n = {...p};
@@ -843,7 +953,7 @@ function VenteModule({state, patchState, currentUser, journee, settings}){
   const nbArticles = lignes.reduce((s,l)=>s+l.qte,0);
   const totalRapide = lignes.reduce((s,l)=>s+l.sousTotal,0);
 
-  const validerVente = ({remise, montantRemise, total, note, credit, clientCredit})=>{
+  const validerVente = ({remise, montantRemise, total, note, credit, clientCredit, clientTelephone, clientMotif, clientFideliteNom, clientFideliteTelephone})=>{
     const vente = {
       id: uid(),
       zone,
@@ -853,6 +963,10 @@ function VenteModule({state, patchState, currentUser, journee, settings}){
       note: note||"",
       credit: !!credit,
       clientCredit: clientCredit||null,
+      clientTelephone: clientTelephone||null,
+      clientMotif: clientMotif||null,
+      clientFideliteNom: clientFideliteNom||null,
+      clientFideliteTelephone: clientFideliteTelephone||null,
       paye: credit ? false : null,
       caissierId: currentUser.id,
       caissierNom: currentUser.nom,
@@ -912,11 +1026,14 @@ function VenteModule({state, patchState, currentUser, journee, settings}){
         {produits.length===0 ? <div className="empty" style={{gridColumn:"span 2"}}>Aucun produit trouvé</div> :
           produits.map(p=>{
             const qte = panier[p.id]||0;
+            const restant = (p.stock||0) - qte;
+            const stockBas = restant <= (p.seuilAlerte||5);
             return (
               <button key={p.id} className={"pos-tile" + (qte>0?" active":"")} onClick={()=>ajouter(p.id)}>
                 {qte>0 && <span className="pos-qte">{qte}</span>}
                 <span className="pos-nom">{p.nom}</span>
                 <span className="pos-prix">{fmtFCFA(p.prix)}</span>
+                {stockBas && <span className="pill" style={{background:"#3a1212", color:"var(--red)", fontSize:10, marginTop:2}}>⚠️ Stock bas ({Math.max(0,restant)})</span>}
               </button>
             );
           })
@@ -1077,6 +1194,30 @@ function Ticket({data, type, settings}){
 }
 
 function printNow(){ setTimeout(()=>window.print(), 100); }
+
+/* =====================================================================
+   COMPOSANT : RELEVÉ DE CRÉANCES IMPRIMABLE (caissier et gérant)
+   ===================================================================== */
+function CreancesPrintable({titre, lignes, settings}){
+  return (
+    <div className="ticket" id="print-ticket">
+      <h4 className="center">{settings.nomEtablissement || "KAYA AMBIANCE"}</h4>
+      <p className="center">{titre}</p>
+      <p className="center" style={{fontSize:11}}>{new Date().toLocaleString('fr-FR')}</p>
+      <hr/>
+      {lignes.length===0 ? <p className="center">Aucune créance</p> : lignes.map((l,i)=>(
+        <React.Fragment key={i}>
+          <div className="line"><span>{l.nom}</span><span>{fmtFCFA(l.montant)}</span></div>
+          {l.telephone && <div className="line" style={{fontSize:11}}><span>Tél.</span><span>{l.telephone}</span></div>}
+          {l.caissier && <div className="line" style={{fontSize:11}}><span>Caissier</span><span>{l.caissier}</span></div>}
+          {l.motif && <div className="line" style={{fontSize:11}}><span>Motif</span><span>{l.motif}</span></div>}
+          <div className="line" style={{fontSize:11}}><span>{l.date}</span><span>{l.statut}</span></div>
+          <hr/>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
 
 /* =====================================================================
    MODULE : STOCK
@@ -1408,8 +1549,9 @@ function ReapproModule({state, patchState, currentUser}){
 /* =====================================================================
    MODULE : DETTES / CREDIT CLIENT
    ===================================================================== */
-function DettesModule({state, patchState}){
+function DettesModule({state, patchState, settings}){
   const [search,setSearch] = useState("");
+  const [apercuImpression,setApercuImpression] = useState(false);
 
   const ventesCredit = (state.ventes||[]).filter(v=>v.credit);
   const marquerPaye = (venteId)=>{
@@ -1449,7 +1591,24 @@ function DettesModule({state, patchState}){
         <div className="kpi-value" style={{color: totalDetteGlobale>0 ? "var(--red)" : "var(--green)"}}>
           {fmtFCFA(totalDetteGlobale)}
         </div>
+        <button className="btn secondary sm" style={{marginTop:8}} onClick={()=>setApercuImpression(a=>!a)}>
+          🖨️ {apercuImpression ? "Masquer l'aperçu" : "Imprimer le relevé complet"}
+        </button>
       </div>
+
+      {apercuImpression && (
+        <div className="card">
+          <CreancesPrintable
+            titre="RELEVÉ GLOBAL DES CRÉANCES"
+            settings={settings || {}}
+            lignes={clients.flatMap(([nom,d])=> d.ventes.filter(v=>!v.paye).map(v=>({
+              nom, telephone: v.clientTelephone, caissier: v.caissierNom, motif: v.clientMotif,
+              date: v.date, statut:"Impayé", montant: v.total
+            })))}
+          />
+          <button className="btn" style={{marginTop:10}} onClick={printNow}>🌐 Lancer l'impression</button>
+        </div>
+      )}
 
       <div className="search-bar">
         <input placeholder="🔍 Rechercher un client..." value={search} onChange={e=>setSearch(e.target.value)} />
@@ -1476,9 +1635,85 @@ function DettesModule({state, patchState}){
                 <div>
                   <div>{fmtFCFA(v.total)} • <span className={v.paye?"pill gerant":"pill"} style={!v.paye?{background:"#3a1212", color:"var(--red)"}:{}}>{v.paye?"Payé":"Impayé"}</span></div>
                   <div className="meta">{v.date} • {v.caissierNom}</div>
+                  {v.clientTelephone && <div className="meta">📞 {v.clientTelephone}</div>}
+                  {v.clientMotif && <div className="meta">Motif : {v.clientMotif}</div>}
                   <div className="meta">{v.items.map(i=>i.nom+" ×"+i.qte).join(", ")}</div>
                 </div>
                 {!v.paye && <button className="btn sm secondary" onClick={()=>marquerPaye(v.id)}>Marquer payé</button>}
+              </div>
+            ))}
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+/* =====================================================================
+   MODULE : MES CRÉANCES (caissier — historique de ses propres clients à crédit)
+   ===================================================================== */
+function MesCreancesModule({state, patchState, currentUser, settings}){
+  const [search,setSearch] = useState("");
+  const [apercuImpression,setApercuImpression] = useState(false);
+
+  const mesCredits = (state.ventes||[]).filter(v=>v.credit && v.caissierId===currentUser.id);
+
+  const parClient = {};
+  mesCredits.forEach(v=>{
+    const c = v.clientCredit || "Client inconnu";
+    if(!parClient[c]) parClient[c] = {impaye:0, paye:0, telephone:v.clientTelephone, ventes:[]};
+    parClient[c][v.paye ? "paye" : "impaye"] += v.total;
+    parClient[c].ventes.push(v);
+  });
+
+  const clients = Object.entries(parClient)
+    .filter(([nom])=> nom.toLowerCase().includes(search.toLowerCase()))
+    .sort((a,b)=> b[1].impaye - a[1].impaye);
+
+  const totalImpaye = clients.reduce((s,[,d])=>s+d.impaye,0);
+
+  const lignesImprimables = clients.flatMap(([nom,d])=> d.ventes.filter(v=>!v.paye).map(v=>({
+    nom, telephone: v.clientTelephone, motif: v.clientMotif, date: v.date, statut:"Impayé", montant: v.total
+  })));
+
+  return (
+    <div>
+      <div className="card">
+        <h3>💳 Mes créances en cours</h3>
+        <div className="kpi-value" style={{color: totalImpaye>0 ? "var(--red)" : "var(--green)"}}>
+          {fmtFCFA(totalImpaye)}
+        </div>
+        <button className="btn secondary sm" style={{marginTop:8}} onClick={()=>setApercuImpression(a=>!a)}>
+          🖨️ {apercuImpression ? "Masquer l'aperçu" : "Imprimer mon relevé"}
+        </button>
+      </div>
+
+      {apercuImpression && (
+        <div className="card">
+          <CreancesPrintable titre={"CRÉANCES — "+currentUser.nom} settings={settings || {}} lignes={lignesImprimables} />
+          <button className="btn" style={{marginTop:10}} onClick={printNow}>🌐 Lancer l'impression</button>
+        </div>
+      )}
+
+      <div className="search-bar">
+        <input placeholder="🔍 Rechercher un client..." value={search} onChange={e=>setSearch(e.target.value)} />
+      </div>
+
+      {clients.length===0 ? <div className="empty">Aucun client à crédit enregistré</div> :
+        clients.map(([nom, d])=>(
+          <div className="card" key={nom}>
+            <div className="row between" style={{marginBottom:8}}>
+              <h3 style={{margin:0}}>{nom}</h3>
+              <b style={{color: d.impaye>0 ? "var(--red)":"var(--green)"}}>{fmtFCFA(d.impaye)}</b>
+            </div>
+            {d.telephone && <div className="meta" style={{marginBottom:6}}>📞 {d.telephone}</div>}
+            {d.ventes.sort((a,b)=>b.timestamp-a.timestamp).map(v=>(
+              <div className="list-item" key={v.id}>
+                <div>
+                  <div>{fmtFCFA(v.total)} • <span className={v.paye?"pill gerant":"pill"} style={!v.paye?{background:"#3a1212", color:"var(--red)"}:{}}>{v.paye?"Payé":"Impayé"}</span></div>
+                  <div className="meta">{v.date}</div>
+                  {v.clientMotif && <div className="meta">Motif : {v.clientMotif}</div>}
+                </div>
               </div>
             ))}
           </div>
@@ -1732,6 +1967,134 @@ function joursSemaine(lundi){
   return arr;
 }
 
+/* =====================================================================
+   MODULE : CLASSEMENT CAISSIERS + REGISTRE DES ANNULATIONS (gérant/owner)
+   ===================================================================== */
+const SEUIL_TAUX_ANNULATION = 20; // % au-delà duquel on alerte le gérant
+
+function ClassementModule({state, settings}){
+  const [periode,setPeriode] = useState("mois"); // "semaine" | "mois"
+  const [ref,setRef] = useState(new Date().toISOString().slice(0,10));
+
+  const toutesVentes = state.ventes || [];
+
+  let ventesPeriode;
+  let labelPeriode;
+  if(periode==="semaine"){
+    const { debut, fin } = semaineDe(ref);
+    ventesPeriode = toutesVentes.filter(v=>v.journee>=debut && v.journee<=fin);
+    labelPeriode = "Semaine du "+formatDateFR(debut);
+  } else {
+    const mois = moisDe(ref);
+    ventesPeriode = toutesVentes.filter(v=>moisDe(v.journee)===mois);
+    labelPeriode = "Mois de "+new Date(mois+"-01T00:00:00").toLocaleDateString('fr-FR',{month:'long', year:'numeric'});
+  }
+
+  const parCaissier = {};
+  ventesPeriode.forEach(v=>{
+    const c = v.caissierNom || "Inconnu";
+    if(!parCaissier[c]) parCaissier[c] = {ca:0, nbVentes:0, nbAnnul:0, credits:0};
+    if(v.annulee){
+      parCaissier[c].nbAnnul += 1;
+    } else {
+      parCaissier[c].ca += v.total;
+      parCaissier[c].nbVentes += 1;
+      if(v.credit) parCaissier[c].credits += v.total;
+    }
+  });
+
+  const classement = Object.entries(parCaissier).map(([nom,d])=>{
+    const totalActes = d.nbVentes + d.nbAnnul;
+    const tauxAnnul = totalActes>0 ? Math.round((d.nbAnnul/totalActes)*100) : 0;
+    return {nom, ...d, tauxAnnul};
+  }).sort((a,b)=>b.ca-a.ca);
+
+  const annulationsPeriode = ventesPeriode.filter(v=>v.annulee).sort((a,b)=>b.timestamp-a.timestamp);
+
+  // ---- Fidélité clients (toutes périodes confondues, identifiés par téléphone) ----
+  const seuilFidelite = (settings && settings.fideliteSeuil) || 10;
+  const parClientFidelite = {};
+  toutesVentes.filter(v=>!v.annulee).forEach(v=>{
+    const tel = v.clientTelephone || v.clientFideliteTelephone;
+    if(!tel) return;
+    const nom = v.clientCredit || v.clientFideliteNom || "Client";
+    if(!parClientFidelite[tel]) parClientFidelite[tel] = {nom, tel, visites:0, total:0};
+    parClientFidelite[tel].visites += 1;
+    parClientFidelite[tel].total += v.total;
+  });
+  const clientsFideles = Object.values(parClientFidelite).sort((a,b)=>b.visites-a.visites);
+
+  return (
+    <div>
+      <div className="zone-toggle">
+        <button className={periode==="semaine"?"active":""} onClick={()=>setPeriode("semaine")}>Semaine</button>
+        <button className={periode==="mois"?"active":""} onClick={()=>setPeriode("mois")}>Mois</button>
+      </div>
+      <div className="field">
+        <label>Date de référence</label>
+        <input type="date" value={ref} onChange={e=>setRef(e.target.value)} />
+      </div>
+
+      <div className="card">
+        <h3>🏆 Classement — {labelPeriode}</h3>
+        {classement.length===0 ? <div className="empty">Aucune vente sur cette période</div> :
+          classement.map((c,i)=>(
+            <div className="list-item" key={c.nom}>
+              <div>
+                <div>{i===0?"🥇":i===1?"🥈":i===2?"🥉":(i+1)+"."} <b>{c.nom}</b></div>
+                <div className="meta">{c.nbVentes} vente{c.nbVentes>1?"s":""} • Crédits accordés : {fmtFCFA(c.credits)}</div>
+                <div className="meta" style={c.tauxAnnul>SEUIL_TAUX_ANNULATION?{color:"var(--red)", fontWeight:700}:{}}>
+                  {c.nbAnnul} annulation{c.nbAnnul>1?"s":""} ({c.tauxAnnul}%) {c.tauxAnnul>SEUIL_TAUX_ANNULATION && "⚠️ Taux anormalement élevé"}
+                </div>
+              </div>
+              <b className="gold">{fmtFCFA(c.ca)}</b>
+            </div>
+          ))
+        }
+      </div>
+
+      <div className="card">
+        <h3>🗑️ Registre des annulations — {labelPeriode}</h3>
+        {annulationsPeriode.length===0 ? <div className="empty">Aucune annulation sur cette période</div> :
+          annulationsPeriode.map(v=>(
+            <div className="list-item" key={v.id}>
+              <div>
+                <div>{fmtFCFA(v.total)} • {v.caissierNom}</div>
+                <div className="meta">{v.date}</div>
+                <div className="meta">Motif : {v.raisonAnnulation || "(non renseigné)"}</div>
+              </div>
+            </div>
+          ))
+        }
+      </div>
+
+      <div className="card">
+        <h3>🎁 Fidélité clients</h3>
+        <p style={{fontSize:11, color:"var(--text-dim)", marginBottom:8}}>
+          Offre due tous les {seuilFidelite} achats (historique complet, tous les clients identifiés par téléphone).
+        </p>
+        {clientsFideles.length===0 ? <div className="empty">Aucun client identifié pour l'instant</div> :
+          clientsFideles.slice(0,20).map(c=>{
+            const eligible = c.visites>0 && c.visites % seuilFidelite === 0;
+            return (
+              <div className="list-item" key={c.tel}>
+                <div>
+                  <div>{c.nom} {eligible && <span className="pill gerant">🎁 Offre due</span>}</div>
+                  <div className="meta">📞 {c.tel} • {c.visites} achat{c.visites>1?"s":""}</div>
+                </div>
+                <b>{fmtFCFA(c.total)}</b>
+              </div>
+            );
+          })
+        }
+      </div>
+    </div>
+  );
+}
+
+/* =====================================================================
+   MODULE : VENTES (gérant/owner — filtres, réimpression, annulation)
+   ===================================================================== */
 function VentesModule({state, patchState, journee}){
   const [vue,setVue] = useState("jour"); // "jour" | "semaine"
   const [filterJournee, setFilterJournee] = useState(journee);
@@ -2197,6 +2560,99 @@ function ExportModule({state, settings, journee}){
   );
 }
 
+function RapportMensuelModule({state, settings}){
+  const [mois,setMois] = useState(new Date().toISOString().slice(0,7));
+
+  const toutesVentes = state.ventes || [];
+  const journeesSet = new Set([
+    ...toutesVentes.filter(v=>!v.annulee && moisDe(v.journee)===mois).map(v=>v.journee),
+    ...Object.keys(state.clotures||{}).filter(j=>moisDe(j)===mois)
+  ]);
+  const journees = [...journeesSet].sort();
+
+  const lignesJours = journees.map(j=>{
+    const ventesJ = toutesVentes.filter(v=>v.journee===j && !v.annulee);
+    const { ca, marge } = calculerCAEtMarge(ventesJ);
+    const cl = state.clotures[j];
+    const depense = cl ? (cl.depenseTerrasse||0)+(cl.depenseBar||0)+(cl.depenseCave||0) : 0;
+    return { jour:j, ca, marge, depense, net: marge-depense };
+  });
+
+  const totalCA = lignesJours.reduce((s,l)=>s+l.ca,0);
+  const totalDepense = lignesJours.reduce((s,l)=>s+l.depense,0);
+  const totalMarge = lignesJours.reduce((s,l)=>s+l.marge,0);
+  const totalNet = totalMarge - totalDepense;
+  const libelleMois = new Date(mois+"-01T00:00:00").toLocaleDateString('fr-FR',{month:'long', year:'numeric'});
+
+  const genererPDF = ()=>{
+    if(!window.jspdf || !window.jspdf.jsPDF){
+      alert("Librairie PDF indisponible — vérifie ta connexion internet et réessaie.");
+      return;
+    }
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    let y = 16;
+    doc.setFont('helvetica','bold'); doc.setFontSize(16);
+    doc.text(settings.nomEtablissement || "KAYA AMBIANCE", 105, y, {align:"center"}); y+=8;
+    doc.setFont('helvetica','normal'); doc.setFontSize(11);
+    doc.text("Rapport mensuel — " + libelleMois, 105, y, {align:"center"}); y+=10;
+
+    doc.setFontSize(11);
+    doc.text("Chiffre d'affaires : " + fmtFCFA(totalCA), 14, y); y+=7;
+    doc.text("Dépenses : " + fmtFCFA(totalDepense), 14, y); y+=7;
+    doc.text("Marge brute : " + fmtFCFA(totalMarge), 14, y); y+=7;
+    doc.setFont('helvetica','bold');
+    doc.text("Bénéfice net : " + fmtFCFA(totalNet), 14, y); y+=10;
+    doc.setFont('helvetica','normal');
+
+    doc.setFontSize(10);
+    doc.text("Détail journalier", 14, y); y+=6;
+    doc.setFontSize(9);
+    doc.text("Date", 14, y); doc.text("CA", 80, y); doc.text("Dépenses", 115, y); doc.text("Marge", 155, y); doc.text("Net", 182, y);
+    y+=3; doc.line(14,y,196,y); y+=5;
+    lignesJours.forEach(l=>{
+      if(y>282){ doc.addPage(); y=15; }
+      doc.text(l.jour, 14, y);
+      doc.text(fmtFCFA(l.ca), 80, y);
+      doc.text(fmtFCFA(l.depense), 115, y);
+      doc.text(fmtFCFA(l.marge), 155, y);
+      doc.text(fmtFCFA(l.net), 182, y);
+      y+=5;
+    });
+    doc.save("rapport-mensuel-"+mois+".pdf");
+  };
+
+  return (
+    <div>
+      <div className="field">
+        <label>Mois</label>
+        <input type="month" value={mois} onChange={e=>setMois(e.target.value)} />
+      </div>
+      <div className="card">
+        <h3>📊 Résumé — {libelleMois}</h3>
+        <div className="row between" style={{marginBottom:6}}><span>Chiffre d'affaires (CA)</span><b>{fmtFCFA(totalCA)}</b></div>
+        <div className="row between" style={{marginBottom:6}}><span>Dépenses</span><b style={{color:"var(--red)"}}>{fmtFCFA(totalDepense)}</b></div>
+        <div className="row between" style={{marginBottom:6}}><span>Marge brute</span><b>{fmtFCFA(totalMarge)}</b></div>
+        <div className="row between" style={{borderTop:"1px dashed var(--border)", paddingTop:6}}>
+          <span>Bénéfice net</span><b className="gold">{fmtFCFA(totalNet)}</b>
+        </div>
+        <button className="btn" style={{marginTop:10}} onClick={genererPDF}>📄 Enregistrer en PDF</button>
+      </div>
+      <div className="card">
+        <h3>Détail par jour</h3>
+        {lignesJours.length===0 ? <div className="empty">Aucune donnée pour ce mois</div> :
+          lignesJours.map(l=>(
+            <div className="list-item" key={l.jour}>
+              <div><div>{formatDateFR(l.jour)}</div><div className="meta">Dépenses : {fmtFCFA(l.depense)} • Marge : {fmtFCFA(l.marge)}</div></div>
+              <b>{fmtFCFA(l.ca)}</b>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  );
+}
+
 function OwnerModule({state, patchState, settings, patchSettings, currentUser, journee}){
   const [tab,setTab] = useState("users");
   const [form,setForm] = useState({nom:"", role:"caissier", zones:["bar"], pin:""});
@@ -2215,6 +2671,7 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
   const [copiesTicket,setCopiesTicket] = useState(settings.copiesTicket || 1);
   const [theme,setTheme] = useState(settings.theme || "sombre");
   const [whatsappRapport,setWhatsappRapport] = useState(settings.whatsappRapport || "");
+  const [fideliteSeuil,setFideliteSeuil] = useState(settings.fideliteSeuil || 10);
 
   const choisirLogo = (e)=>{
     const file = e.target.files[0];
@@ -2250,7 +2707,7 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
     patchSettings({
       heureArret: Number(heureArret), nomEtablissement: nomEtab,
       adresse, logoDataUrl, piedTicket: piedTicket.split("\n").slice(0,3).join("\n"), copiesTicket: Number(copiesTicket),
-      theme, whatsappRapport: whatsappRapport.replace(/[^\d+]/g,"")
+      theme, whatsappRapport: whatsappRapport.replace(/[^\d+]/g,""), fideliteSeuil: Number(fideliteSeuil)||10
     });
     alert("Paramètres enregistrés.");
   };
@@ -2262,6 +2719,8 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
         <button className={tab==="params"?"active":""} onClick={()=>setTab("params")}>Paramètres</button>
         <button className={tab==="reappro"?"active":""} onClick={()=>setTab("reappro")}>Stock</button>
         <button className={tab==="dettes"?"active":""} onClick={()=>setTab("dettes")}>Dettes</button>
+        <button className={tab==="classement"?"active":""} onClick={()=>setTab("classement")}>Équipe</button>
+        <button className={tab==="rapportmensuel"?"active":""} onClick={()=>setTab("rapportmensuel")}>Rapport PDF</button>
         <button className={tab==="avoirs"?"active":""} onClick={()=>setTab("avoirs")}>Avoirs</button>
         <button className={tab==="global"?"active":""} onClick={()=>setTab("global")}>Clôtures</button>
         <button className={tab==="export"?"active":""} onClick={()=>setTab("export")}>Export</button>
@@ -2272,7 +2731,15 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
       )}
 
       {tab==="dettes" && (
-        <DettesModule state={state} patchState={patchState} />
+        <DettesModule state={state} patchState={patchState} settings={settings} />
+      )}
+
+      {tab==="classement" && (
+        <ClassementModule state={state} settings={settings} />
+      )}
+
+      {tab==="rapportmensuel" && (
+        <RapportMensuelModule state={state} settings={settings} />
       )}
 
       {tab==="users" && (
@@ -2434,6 +2901,20 @@ function OwnerModule({state, patchState, settings, patchSettings, currentUser, j
         </div>
       )}
 
+      {tab==="params" && (
+        <div className="card">
+          <h3>🎁 Programme de fidélité</h3>
+          <div className="field">
+            <label>Offre due tous les X achats d'un même client</label>
+            <input type="number" min="2" value={fideliteSeuil} onChange={e=>setFideliteSeuil(e.target.value)} />
+          </div>
+          <p style={{fontSize:11, color:"var(--text-dim)"}}>
+            Dès qu'un client (identifié par son numéro de téléphone) atteint ce nombre d'achats, il apparaît comme "Offre due" dans l'onglet Équipe → Fidélité.
+          </p>
+          <button className="btn" style={{marginTop:8}} onClick={sauverParams}>Enregistrer les paramètres</button>
+        </div>
+      )}
+
       {tab==="export" && (
         <ExportModule state={state} settings={settings} journee={journee} />
       )}
@@ -2489,7 +2970,7 @@ function App(){
   });
   const [settings,setSettings] = useState(()=>{
     const ls = loadLS();
-    return ls.settings || {heureArret:2, nomEtablissement:"Kaya Ambiance", theme:"sombre"};
+    return ls.settings || {heureArret:2, nomEtablissement:"Kaya Ambiance", theme:"sombre", fideliteSeuil:10};
   });
   const [currentUser,setCurrentUser] = useState(null);
   const [tab,setTab] = useState("vente");
@@ -2637,11 +3118,13 @@ function App(){
       {id:"stock", label:"Stock", ic:"📦"},
       {id:"reappro", label:"Réappro", ic:"📥"},
       {id:"dettes", label:"Dettes", ic:"💳"},
+      {id:"classement", label:"Équipe", ic:"🏆"},
       {id:"cloture", label:"Arrêt", ic:"🔒"},
     ],
     caissier: [
       {id:"vente", label:"Catalogue", ic:"🛒"},
       {id:"mesventes", label:"Mes ventes", ic:"📈"},
+      {id:"creances", label:"Créances", ic:"💳"},
       {id:"avoirs", label:"Avoirs", ic:"📄"},
     ],
   };
@@ -2663,10 +3146,12 @@ function App(){
       <div className="content">
         {tab==="vente" && currentUser.role==="caissier" && <VenteModule state={state} patchState={patchState} currentUser={currentUser} journee={journee} settings={settings} />}
         {tab==="mesventes" && currentUser.role==="caissier" && <MesVentesModule state={state} patchState={patchState} currentUser={currentUser} journee={journee} settings={settings} />}
+        {tab==="creances" && currentUser.role==="caissier" && <MesCreancesModule state={state} patchState={patchState} currentUser={currentUser} settings={settings} />}
         {tab==="avoirs" && <AvoirsModule state={state} patchState={patchState} currentUser={currentUser} journee={journee} settings={settings} />}
         {tab==="stock" && currentUser.role!=="owner" && <StockModule state={state} patchState={patchState} currentUser={currentUser} journee={journee} />}
         {tab==="reappro" && currentUser.role==="gerant" && <ReapproModule state={state} patchState={patchState} currentUser={currentUser} />}
-        {tab==="dettes" && currentUser.role==="gerant" && <DettesModule state={state} patchState={patchState} />}
+        {tab==="dettes" && currentUser.role==="gerant" && <DettesModule state={state} patchState={patchState} settings={settings} />}
+        {tab==="classement" && currentUser.role==="gerant" && <ClassementModule state={state} settings={settings} />}
         {tab==="cloture" && currentUser.role==="gerant" && <ClotureModule state={state} patchState={patchState} currentUser={currentUser} journee={journee} />}
         {tab==="rapport" && (currentUser.role==="gerant" || currentUser.role==="owner") && <VentesModule state={state} patchState={patchState} journee={journee} />}
         {tab==="dashboard" && currentUser.role==="owner" && <DashboardModule state={state} journee={journee} />}
